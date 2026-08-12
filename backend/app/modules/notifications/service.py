@@ -202,11 +202,17 @@ def assigned_message(
 
 
 def status_message(code: str, title: str, new_status: str) -> tuple[str, str]:
-    return (f"Ticket {code} đổi trạng thái", f"{title} — nay là {new_status}")
+    return (f"Ticket {code} đổi trạng thái", f"Nay là {new_status}")
 
+def rating_requested_message(code: str, title: str) -> tuple[str, str]:
+    return (
+        f"Ticket {code} đã được giải quyết",
+        f"Vui lòng đánh giá mức độ hài lòng của bạn",
+    )
+ 
 
 def resolved_message(code: str, title: str) -> tuple[str, str]:
-    return (f"Ticket {code} đã được xử lý", f"{title} — mời bạn kiểm tra và xác nhận")
+    return (f"Ticket {code} đã được xử lý", f"Mời bạn kiểm tra và xác nhận")
 
 
 def commented_message(code: str, title: str, author_name: str) -> tuple[str, str]:

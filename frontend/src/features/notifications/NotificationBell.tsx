@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { notificationsApi } from "@/api/notifications";
+import { useAuth } from "@/features/auth/AuthProvider";
 import { useNotificationSocket } from "@/features/notifications/useNotificationSocket";
 import { Button, LoadingBlock } from "@/components/ui";
 import { cn } from "@/lib/utils";
@@ -40,22 +41,33 @@ export function NotificationBell() {
   const panelRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
 
+  // ★ `user.id` nằm TRONG query key — không chỉ dựa vào `queryClient.clear()`
+  // lúc đăng nhập/đăng xuất. Một request REST của user A đang bay giữa
+  // chừng lúc B đăng nhập, nếu vì lý do gì đó (bug, race hiếm) vẫn ghi được
+  // vào cache, thì cũng chỉ ghi vào Ô CỦA A — không có cách nào lẫn sang ô
+  // B đang đọc, vì hai user không bao giờ chung một key.
   const countQuery = useQuery({
-    queryKey: ["notifications", "unread-count"],
+    queryKey: ["notifications", "unread-count", user?.id],
     queryFn: notificationsApi.unreadCount,
-    // Không còn polling — chỉ một lần lúc mount, xem comment đầu file.
+    // Không polling định kỳ (xem comment đầu file), nhưng BẮT BUỘC fetch lại
+    // mỗi lần component này mount — component chỉ mount khi đã đăng nhập
+    // (ProtectedRoute gate), nên "mount" ở đây đồng nghĩa "vừa vào phiên
+    // mới".
     staleTime: Infinity,
+    refetchOnMount: "always",
     refetchOnWindowFocus: false,
+    enabled: !!user,
   });
 
   const listQuery = useQuery({
-    queryKey: ["notifications", "list"],
+    queryKey: ["notifications", "list", user?.id],
     queryFn: () => notificationsApi.list(1),
-    enabled: open,
+    enabled: open && !!user,
   });
 
-  useNotificationSocket(true);
+  useNotificationSocket(true, user?.id);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["notifications"] });

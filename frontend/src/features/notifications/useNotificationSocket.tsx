@@ -20,28 +20,29 @@ const MAX_BACKOFF_MS = 30_000;
 
 function patchUnreadCount(
   queryClient: ReturnType<typeof useQueryClient>,
+  userId: string | undefined,
   update: (count: number) => number,
 ) {
   queryClient.setQueryData<{ count: number }>(
-    ["notifications", "unread-count"],
-    (old) => ({
-      count: Math.max(0, update(old?.count ?? 0)),
-    }),
+    ["notifications", "unread-count", userId],
+    (old) => ({ count: Math.max(0, update(old?.count ?? 0)) }),
   );
 }
 
 function patchList(
   queryClient: ReturnType<typeof useQueryClient>,
+  userId: string | undefined,
   update: (page: Page<AppNotification>) => Page<AppNotification>,
 ) {
   queryClient.setQueryData<Page<AppNotification>>(
-    ["notifications", "list"],
+    ["notifications", "list", userId],
     (old) => (old ? update(old) : old),
   );
 }
 
 function handleMessage(
   queryClient: ReturnType<typeof useQueryClient>,
+  userId: string | undefined,
   raw: string,
 ) {
   let message: NotificationSocketEvent;
@@ -53,8 +54,8 @@ function handleMessage(
 
   switch (message.event) {
     case "notification:new":
-      patchUnreadCount(queryClient, (n) => n + 1);
-      patchList(queryClient, (page) => ({
+      patchUnreadCount(queryClient, userId, (n) => n + 1);
+      patchList(queryClient, userId, (page) => ({
         ...page,
         data: [message.data, ...page.data],
         pagination: {
@@ -65,8 +66,8 @@ function handleMessage(
       break;
 
     case "notification:read":
-      patchUnreadCount(queryClient, (n) => n - 1);
-      patchList(queryClient, (page) => ({
+      patchUnreadCount(queryClient, userId, (n) => n - 1);
+      patchList(queryClient, userId, (page) => ({
         ...page,
         data: page.data.map((item) =>
           item.id === message.data.id ? { ...item, isRead: true } : item,
@@ -75,8 +76,8 @@ function handleMessage(
       break;
 
     case "notification:read_all":
-      patchUnreadCount(queryClient, () => 0);
-      patchList(queryClient, (page) => ({
+      patchUnreadCount(queryClient, userId, () => 0);
+      patchList(queryClient, userId, (page) => ({
         ...page,
         data: page.data.map((item) => ({ ...item, isRead: true })),
       }));
@@ -84,7 +85,17 @@ function handleMessage(
   }
 }
 
-export function useNotificationSocket(enabled: boolean): void {
+/**
+ * @param userId ID của user đang đăng nhập — bắt buộc truyền vào (không tự
+ * đọc qua `useAuth()` bên trong hook) để hook luôn ghi đúng vào cache của
+ * ĐÚNG người đang mở kết nối này, không bao giờ có khả năng lẫn dữ liệu
+ * giữa hai phiên đăng nhập nối tiếp trên cùng một tab. Cũng giữ hook không
+ * phụ thuộc `AuthProvider`, dễ test độc lập.
+ */
+export function useNotificationSocket(
+  enabled: boolean,
+  userId: string | undefined,
+): void {
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -106,7 +117,7 @@ export function useNotificationSocket(enabled: boolean): void {
       };
 
       socket.onmessage = (event: MessageEvent<string>) => {
-        handleMessage(queryClient, event.data);
+        handleMessage(queryClient, userId, event.data);
       };
 
       socket.onclose = () => {
@@ -131,5 +142,8 @@ export function useNotificationSocket(enabled: boolean): void {
       if (retryTimer) clearTimeout(retryTimer);
       socket?.close();
     };
-  }, [enabled, queryClient]);
+    // `userId` cố ý nằm trong deps: đổi user (đăng xuất rồi đăng nhập user
+    // khác mà component không unmount vì lý do gì đó) phải đóng kết nối cũ
+    // và mở kết nối mới, không được tiếp tục ghi vào cache của user cũ.
+  }, [enabled, userId, queryClient]);
 }

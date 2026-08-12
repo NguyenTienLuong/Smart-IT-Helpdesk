@@ -34,6 +34,7 @@ from app.modules.notifications.service import (
     NotificationService,
     assigned_message,
     commented_message,
+    rating_requested_message,
     resolved_message,
     status_message,
 )
@@ -397,6 +398,14 @@ class TicketService:
         if data.resolution_note:
             ticket.resolution_note = data.resolution_note.strip()
 
+        # Ticket trở nên "có thể đánh giá" (RATEABLE_STATUSES ở feedback/service.py)
+        # đúng một lần duy nhất: hoặc lúc chuyển sang RESOLVED, hoặc lúc bấm
+        # thẳng CLOSED mà trước đó chưa từng qua RESOLVED. Nếu đã từng RESOLVED
+        # rồi mới CLOSED thì lời mời đánh giá đã gửi từ lúc đó — không gửi lại.
+        just_became_rateable = data.status == TicketStatus.RESOLVED or (
+            data.status == TicketStatus.CLOSED and old_status != TicketStatus.RESOLVED
+        )
+
         if data.status == TicketStatus.RESOLVED:
             ticket.resolved_at = now
         elif data.status == TicketStatus.CLOSED:
@@ -421,7 +430,7 @@ class TicketService:
             old_value=old_status,
             new_value=data.status,
         )
-        self._notify_status_change(ticket, user, data.status)
+        self._notify_status_change(ticket, user, data.status, just_became_rateable)
         self.db.commit()
 
         logger.info(
@@ -834,7 +843,13 @@ class TicketService:
 
     # ── Thông báo (F6) ────────────────────────────────────────────────
 
-    def _notify_status_change(self, ticket: Ticket, actor: User, new_status: TicketStatus) -> None:
+    def _notify_status_change(
+        self,
+        ticket: Ticket,
+        actor: User,
+        new_status: TicketStatus,
+        just_became_rateable: bool = False,
+    ) -> None:
         """US-33 — báo cho người yêu cầu và người xử lý khi trạng thái đổi.
 
         Người vừa bấm nút bị BR-18 loại ra, nên hai lời gọi dưới đây tự động
@@ -869,6 +884,22 @@ class TicketService:
             entity_id=ticket.id,
             actor_id=actor.id,
         )
+
+        # F6–F8: mời người yêu cầu đánh giá ngay khi ticket lần đầu tới
+        # trạng thái có thể đánh giá được (RATEABLE_STATUSES). BR-18 vẫn áp
+        # dụng qua notify(): nếu chính requester là người bấm đóng ticket
+        # (self-service close) thì actor_id == user_id, không tự mời mình.
+        if just_became_rateable:
+            title, body = rating_requested_message(ticket.code, ticket.title)
+            self.notifier.notify(
+                user_id=ticket.requester_id,
+                notification_type="RATING_REQUESTED",
+                title=title,
+                body=body,
+                entity_type=ENTITY_TICKET,
+                entity_id=ticket.id,
+                actor_id=actor.id,
+            )
 
     def _notify_comment(self, ticket: Ticket, actor: User, is_internal: bool) -> None:
         """US-33 — báo khi có bình luận mới, trừ bình luận của chính mình.
@@ -953,3 +984,5 @@ class TicketService:
             now=now or datetime.now(UTC),
             paused_seconds=ticket.paused_seconds,
         )
+        
+        
