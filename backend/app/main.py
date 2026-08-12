@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.error_handlers import register_error_handlers
 from app.core.logging import get_logger, setup_logging
 from app.core.middleware import RequestContextMiddleware
+from app.core.ws_manager import ws_manager
 
 # ★ BẮT BUỘC — nạp TOÀN BỘ model trước khi SQLAlchemy dựng mapper.
 # Quan hệ khai báo bằng chuỗi (ví dụ ChatCitation.article -> "KbArticle") chỉ
@@ -25,8 +26,15 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    import asyncio
+
     logger.info(f"Khởi động {settings.APP_NAME} — môi trường {settings.ENVIRONMENT}")
+    # ADR-0009: WebSocket cần biết event loop đang chạy để `notify_sync()`
+    # (gọi từ code đồng bộ) lập lịch gửi qua `run_coroutine_threadsafe`.
+    ws_manager.bind_loop(asyncio.get_running_loop())
+    await ws_manager.start_redis_listener()
     yield
+    await ws_manager.stop_redis_listener()
     logger.info("Dừng ứng dụng")
 
 
@@ -58,3 +66,4 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 @app.get("/", include_in_schema=False)
 def root() -> dict:
     return {"app": settings.APP_NAME, "docs": "/docs", "health": "/health/live"}
+

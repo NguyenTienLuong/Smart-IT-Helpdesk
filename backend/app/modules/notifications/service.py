@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.pagination import PageParams
+from app.core.ws_manager import ws_manager
 from app.modules.notifications.constants import NOTIFICATION_TYPES
 from app.modules.notifications.models import Notification
 from app.modules.notifications.repository import NotificationRepository
@@ -92,7 +93,7 @@ class NotificationService:
             )
             return None
 
-        return self.notifications.add(
+        created = self.notifications.add(
             Notification(
                 user_id=user_id,
                 type=notification_type,
@@ -103,6 +104,16 @@ class NotificationService:
                 is_read=False,
             )
         )
+
+        # ADR-0009: đẩy realtime qua WebSocket thay cho polling. `notify()`
+        # chưa `commit()` (bên gọi tự quyết định lúc nào commit — xem
+        # docstring đầu file), nên về lý thuyết có thể đẩy một thông báo mà
+        # transaction sau đó rollback. Chấp nhận được: hệ quả tệ nhất là
+        # client thấy một badge/chuông không khớp DB trong vài trăm ms, tự
+        # sửa lại ở lần đồng bộ tiếp theo — không phải mất dữ liệu.
+        ws_manager.notify_sync(user_id, {"event": "notification:new", "data": _ws_payload(created)})
+
+        return created
 
     def notify_many(self, user_ids: list[UUID], **kwargs) -> int:
         """Gửi cùng một thông báo cho nhiều người (ví dụ toàn bộ Admin).
@@ -133,6 +144,13 @@ class NotificationService:
     def mark_read(self, user_id: UUID, notification_id: UUID) -> int:
         updated = self.notifications.mark_read(user_id, notification_id, datetime.now(UTC))
         self.db.commit()
+        if updated:
+            # Đồng bộ badge/list ở các tab/thiết bị KHÁC của cùng user — tab
+            # vừa gọi API này đã tự cập nhật UI từ response REST, không cần
+            # nhận lại chính sự kiện của mình.
+            ws_manager.notify_sync(
+                user_id, {"event": "notification:read", "data": {"id": str(notification_id)}}
+            )
         return updated
 
     def mark_all_read(self, user_id: UUID) -> int:
@@ -142,7 +160,28 @@ class NotificationService:
             "đánh dấu đã đọc tất cả",
             extra={"extra_fields": {"user_id": str(user_id), "count": updated}},
         )
+        if updated:
+            ws_manager.notify_sync(user_id, {"event": "notification:read_all", "data": {}})
         return updated
+
+
+# ── Dựng payload WebSocket ─────────────────────────────────────────────
+
+
+def _ws_payload(n: Notification) -> dict:
+    """camelCase để khớp `NotificationResponse` phía REST — frontend dùng
+    chung một kiểu dữ liệu cho cả hai nguồn, không phải viết hai lần."""
+    return {
+        "id": str(n.id),
+        "type": n.type,
+        "title": n.title,
+        "body": n.body,
+        "entityType": n.entity_type,
+        "entityId": str(n.entity_id) if n.entity_id else None,
+        "isRead": n.is_read,
+        "readAt": n.read_at.isoformat() if n.read_at else None,
+        "createdAt": n.created_at.isoformat() if n.created_at else None,
+    }
 
 
 # ── Dựng nội dung thông báo ───────────────────────────────────────────

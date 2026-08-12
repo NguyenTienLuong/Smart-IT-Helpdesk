@@ -41,7 +41,7 @@ services:
   minio-init:
     image: minio/mc:latest
     depends_on:
-      minio: {condition: service_healthy}
+      minio: { condition: service_healthy }
     environment:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
@@ -50,31 +50,31 @@ services:
     entrypoint: ["/bin/sh", "/init.sh"]
 
   api:
-    build: {context: ./backend}
+    build: { context: ./backend }
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     env_file: [.env]
     ports: ["8000:8000"]
     volumes: ["./backend:/app"]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
   worker:
-    build: {context: ./backend}
+    build: { context: ./backend }
     command: celery -A app.celery_app worker --loglevel=info -Q default,ai,notifications
     env_file: [.env]
     volumes: ["./backend:/app"]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
   beat:
-    build: {context: ./backend}
+    build: { context: ./backend }
     command: celery -A app.celery_app beat --loglevel=info
     env_file: [.env]
     volumes: ["./backend:/app"]
     depends_on:
-      redis: {condition: service_healthy}
+      redis: { condition: service_healthy }
 
 volumes:
   pgdata:

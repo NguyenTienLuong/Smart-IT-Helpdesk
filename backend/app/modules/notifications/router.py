@@ -3,16 +3,24 @@
 Mọi endpoint ở đây chỉ thao tác trên thông báo của CHÍNH người đang đăng
 nhập — `user_id` được đưa thẳng vào mệnh đề WHERE ở repository, không phải
 kiểm tra bằng một câu `if` ở tầng route.
+
+★ REALTIME (ADR-0009, ghi đè ADR-0008): kênh đẩy sự kiện là `/ws` bên dưới.
+Các endpoint REST (list/unread-count/mark-read) vẫn giữ nguyên — WebSocket
+chỉ thay cho việc *polling định kỳ*, không thay cho việc đọc dữ liệu ban đầu
+khi trang vừa tải hoặc khi kết nối WS chưa kịp mở.
 """
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
 from app.core.exceptions import NotFoundError
+from app.core.logging import get_logger
 from app.core.pagination import Page, PageParams, page_params
+from app.core.security import decode_access_token
+from app.core.ws_manager import ws_manager
 from app.db.session import get_db
 from app.modules.notifications.schemas import (
     MarkReadResponse,
@@ -21,6 +29,9 @@ from app.modules.notifications.schemas import (
 )
 from app.modules.notifications.service import NotificationService
 from app.modules.users.models import User
+from app.modules.users.repository import UserRepository
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -43,14 +54,15 @@ def list_notifications(
 @router.get(
     "/unread-count",
     response_model=UnreadCountResponse,
-    summary="Đếm thông báo chưa đọc (frontend polling 30 giây)",
+    summary="Đếm thông báo chưa đọc (snapshot lúc tải trang / kết nối WS chưa kịp mở)",
 )
 def unread_count(
     current_user: User = Depends(get_current_user),
     service: NotificationService = Depends(get_notification_service),
 ) -> UnreadCountResponse:
-    """★ Đây là endpoint bị gọi nhiều nhất hệ thống: 30 giây/lần × mọi người
-    đang online. Giữ nó rẻ — chỉ một `COUNT` chạy trên partial index."""
+    """Không còn bị gọi 30 giây/lần (ADR-0009 thay bằng WebSocket) — chỉ gọi
+    một lần lúc mount và làm phao dự phòng nếu WS chưa kết nối được. Vẫn giữ
+    rẻ như cũ — chỉ một `COUNT` chạy trên partial index."""
     return UnreadCountResponse(count=service.unread_count(current_user.id))
 
 
@@ -79,3 +91,44 @@ def mark_all_read(
     service: NotificationService = Depends(get_notification_service),
 ) -> MarkReadResponse:
     return MarkReadResponse(updated=service.mark_all_read(current_user.id))
+
+
+@router.websocket("/ws")
+async def notifications_ws(
+    websocket: WebSocket,
+    token: str = Query(...),
+    db: Session = Depends(get_db),
+) -> None:
+    """Kênh đẩy realtime (ADR-0009). Xác thực bằng `?token=` trên URL —
+
+    trình duyệt KHÔNG cho gắn header tuỳ ý vào lúc bắt tay WebSocket, đây là
+    lý do duy nhất token phải nằm trên query string thay vì header Bearer
+    như REST. Đánh đổi: token có thể lộ vào access log của proxy/CDN đứng
+    trước — chấp nhận được vì đây là access token sống ngắn hạn, không phải
+    refresh token.
+    """
+    try:
+        payload = decode_access_token(token)
+        user_id = UUID(payload["sub"])
+    except Exception:
+        await websocket.close(code=4401)
+        return
+
+    user = UserRepository(db).get_by_id(user_id)
+    if user is None or not user.is_active:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+    ws_manager.register(user.id, websocket)
+    logger.debug("ws: kết nối mới", extra={"extra_fields": {"user_id": str(user.id)}})
+    try:
+        while True:
+            # Không cần đọc gì từ client — chỉ chờ để phát hiện lúc client
+            # đóng kết nối (WebSocketDisconnect). Client có thể gửi ping
+            # riêng để giữ kết nối qua proxy timeout; ta bỏ qua nội dung.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ws_manager.unregister(user.id, websocket)
